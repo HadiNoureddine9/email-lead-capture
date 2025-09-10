@@ -256,9 +256,4 @@ Hi there, I'm the VP of Ops at **Acme Corporation**, and I'm interested in your 
 3) Activate the workflow and forward the test emails.
 
 
----
-
-## License
-MIT (or choose your preferred license).
-
 
