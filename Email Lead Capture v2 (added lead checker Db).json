@@ -1,0 +1,755 @@
+{
+  "name": "Email Lead Capture v2 (added lead checker Db)",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -176,
+        112
+      ],
+      "id": "87b4e463-221e-40e3-83ed-2a003222ba24",
+      "name": "Email Trigger (IMAP)",
+      "notesInFlow": false,
+      "credentials": {
+        "imap": {
+          "id": "GtuvD5Iyx3Nk2daD",
+          "name": "IMAP account"
+        }
+      },
+      "disabled": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "tableId": "leads",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "first_name",
+              "fieldValue": "={{ $('Parse Email').first().json.first_name }}"
+            },
+            {
+              "fieldId": "last_name",
+              "fieldValue": "={{ $('Parse Email').first().json.last_name }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $('Parse Email').first().json.email }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1824,
+        0
+      ],
+      "id": "dff20762-4308-4a99-b3c8-2aa7a7ae1a8a",
+      "name": "Create Lead",
+      "credentials": {
+        "supabaseApi": {
+          "id": "bFjWxpu48pRVerv1",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "companies",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "name",
+              "fieldValue": "={{ $('Parse Email').first().json.company_name }}"
+            },
+            {
+              "fieldId": "domain",
+              "fieldValue": "={{ $('Parse Email').first().json.domain }}"
+            },
+            {
+              "fieldId": "logo_url",
+              "fieldValue": "={{ $('Fetch Company (Clearbit)').first().json.logo }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3344,
+        -64
+      ],
+      "id": "7196ede4-e33d-4c49-874a-bec1ee9f0b62",
+      "name": "Create company",
+      "credentials": {
+        "supabaseApi": {
+          "id": "bFjWxpu48pRVerv1",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "\nconst emailData = item.json;\n\n// Use textPlain first (easiest to parse), fallback to textHtml\nconst emailBody = emailData.textPlain || emailData.textHtml || \"\";\n\nif (!emailBody.trim()) {\n  return {\n    json: {\n      status: \"error\",\n      message: \"Email body empty\",\n      debug: { keys: Object.keys(emailData) }\n    }\n  };\n}\n\n// --- Parse Forwarded Content ---\nlet full_name = \"\";\nlet email = \"\";\n\nconst fromRegexes = [\n  /^From:\\s*(.+?)\\s*<([^<>\\s]+@[^<>\\s]+\\.[^<>\\s]+)>/im, // Name + email\n  /^From:\\s*<([^<>\\s]+@[^<>\\s]+\\.[^<>\\s]+)>/im,          // Email only\n  /^From:\\s*([^<>\\s]+@[^<>\\s]+\\.[^<>\\s]+)/im             // Simple email\n];\n\nfor (const regex of fromRegexes) {\n  const match = emailBody.match(regex);\n  if (match) {\n    if (match[1] && match[2]) {\n      full_name = match[1].trim();\n      email = match[2].trim();\n    } else if (match[1]) {\n      email = match[1].trim();\n    }\n    break;\n  }\n}\n\n// --- Validate Email ---\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!email || !emailRegex.test(email)) {\n  return {\n    json: {\n      status: \"error\",\n      message: \"No valid email found in forwarded content\",\n      debug: { preview: emailBody.substring(0, 300) }\n    }\n  };\n}\n\n// --- Split Name ---\nlet first_name = \"\";\nlet last_name = \"\";\nif (full_name) {\n  const parts = full_name.split(\" \");\n  first_name = parts[0] || \"\";\n  last_name = parts.slice(1).join(\" \") || \"\";\n}\n\n// If no name, try from email prefix\nif (!first_name) {\n  const prefix = email.split(\"@\")[0];\n  if (prefix.includes(\".\")) {\n    const [f, l] = prefix.split(\".\");\n    first_name = f;\n    last_name = l || \"\";\n  } else {\n    first_name = prefix;\n  }\n}\n\n// --- Normalize ---\nfunction capitalize(str) {\n  return str ? str.charAt(0).toUpperCase() + str.slice(1).toLowerCase() : \"\";\n}\nfirst_name = capitalize(first_name);\nlast_name = capitalize(last_name);\n\n// --- Extract Domain + Company ---\nconst domain = email.split(\"@\")[1];\nconst company_from_domain = domain\n  .replace(/\\.(com|net|org|co|io|tech|biz|info|gov|edu)$/i, \"\")\n  .replace(/[-_]/g, \" \")\n  .split(\" \")\n  .map(capitalize)\n  .join(\" \");\n\n// Enhanced company detection for personal emails\nlet company_name = company_from_domain;\n\n// If it's a generic domain (gmail, outlook, etc.), look for company in body\nconst genericDomains = ['gmail.com', 'outlook.com', 'yahoo.com', 'hotmail.com'];\nif (genericDomains.some(d => domain.toLowerCase().includes(d))) {\n  // Look for company mentions in email body\n  const companyPatterns = [\n    /at\\s+\\*\\*([^*]+)\\*\\*/i,  // at **Company Name**\n    /at\\s+([A-Z][a-zA-Z\\s&]+(?:Corporation|Corp|Inc|LLC|Ltd|Company))/i,\n    /work(?:ing)?\\s+(?:at|for)\\s+([A-Z][a-zA-Z\\s&]+)/i\n  ];\n  \n  for (const pattern of companyPatterns) {\n    const match = emailBody.match(pattern);\n    if (match && match[1]) {\n      company_name = match[1].trim();\n      break;\n    }\n  }\n}\n\n// --- Final Output ---\nreturn {\n  json: {\n    status: \"success\",\n    message: \"Forwarded lead parsed\",\n    full_name: full_name || `${first_name} ${last_name}`.trim(),\n    first_name,\n    last_name,\n    email,\n    subject: emailData.subject || \"\",\n    forwarded_by: emailData.from || \"\",\n    domain,\n    company_name: company_name  \n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        0
+      ],
+      "id": "633e81e6-7feb-4943-88eb-5af3402a0f2f",
+      "name": "Parse Email",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "url": "=https://autocomplete.clearbit.com/v1/companies/suggest?query={{ $('Parse Email').item.json.company_name }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2192,
+        -128
+      ],
+      "id": "8b763095-f9c2-43f4-ad1f-d5143068390b",
+      "name": "Fetch Company (Clearbit)"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "companies",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "domain",
+              "keyValue": "={{ $('Parse Email').first().json.domain }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2720,
+        -240
+      ],
+      "id": "42bec97d-87cb-4093-910f-7f8adabd2671",
+      "name": "Lookup Company in DB1",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "bFjWxpu48pRVerv1",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a77683b6-b569-41c6-8441-f6cdade357c6",
+              "leftValue": "={{ $json.companyExists }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3136,
+        -240
+      ],
+      "id": "7b817222-246f-44d0-ab22-5caa4a21e6e9",
+      "name": "Company Exists in DB?",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Create Lead').first().json.id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "company_id",
+              "fieldValue": "={{ $json.company_id }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3840,
+        -240
+      ],
+      "id": "86cb9d90-ff34-46d4-978c-0e2c80e6ba28",
+      "name": "Link Lead to Company",
+      "credentials": {
+        "supabaseApi": {
+          "id": "bFjWxpu48pRVerv1",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "let company_id = null;\n\nfor (const item of items) {\n  const data = item.json;\n\n  // Case 1: Supabase SELECT returns an array of rows\n  if (Array.isArray(data) && data.length > 0 && data[0].id) {\n    company_id = data[0].id;\n    break;\n  }\n\n  // Case 2: Supabase returns a single row (object)\n  if (data && data.id) {\n    company_id = data.id;\n    break;\n  }\n\n  // Case 3: Wrapped response (e.g. { company: { id: 52 } })\n  if (data.company && data.company.id) {\n    company_id = data.company.id;\n    break;\n  }\n}\n\nreturn [{\n  json: { company_id }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3568,
+        -240
+      ],
+      "id": "581b89dc-2760-438c-9def-325fd8fc8266",
+      "name": "Resolve Company ID"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "21171ff7-6161-4c37-b1dd-8bf44e66b37b",
+              "leftValue": "{{ $json.email }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        800,
+        0
+      ],
+      "id": "da03763a-8bc0-433e-b9d4-3051ed9c705c",
+      "name": "Lead Parsed ?"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n      \"textPlain\": \"---------- Forwarded message ---------\\nFrom: Maria Garcia <maria@summit-logistics.com>\\nDate: Tue, May 21, 2024 at 3:15 PM\\nSubject: Re: Following up\\nTo: <your-sales-email@example.com>\\n\\nYes, I'm available to chat tomorrow at 2 PM.\\n\\n> On Tue, May 21, 2024 at 1:00 PM, You wrote:\\n>\\n> Hi Maria, are you free for a call this week?\\n>\"\n    }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        304,
+        -464
+      ],
+      "id": "eada56ec-759e-48b3-a43f-096aad69347e",
+      "name": "Test Case Loader",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -64,
+        -624
+      ],
+      "id": "138e2e39-34db-49b7-bc27-99be62dc7eca",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": " {\n      \"textPlain\": \"---------- Forwarded message ---------\\nFrom: <info@global-corp.net>\\nDate: Tue, May 21, 2024 at 4:00 PM\\nSubject: Info Request\\nTo: <your-sales-email@example.com>\\n\\nPlease send product datasheets.\"\n    }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        176,
+        -336
+      ],
+      "id": "23e01eb2-73bf-450a-9de4-c7ade14ee213",
+      "name": "Test Case Loader1",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"textPlain\": \"---------- Forwarded message ---------\\nFrom: Michael Chen <m.chen88@gmail.com>\\nDate: Thu, May 23, 2024 at 1:20 PM\\n\\nHi there, I'm the VP of Ops at **Acme Corporation**, and I'm interested in your services.\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -48,
+        -320
+      ],
+      "id": "7fa1e81e-4f3c-4bb3-a00b-15032275b826",
+      "name": "Test Case Loader2",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n      \"textPlain\": \"--------- Forwarded message ---------\\n\\nFrom: Jane Smith <jane.smith@widgets.co>\\nDate: Wed, May 22, 2024 at 11:30 AM\\nSubject: Question\\nTo: <your-sales-email@example.com>\\n\\nCould you send me your pricing information?\"\n    }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        464,
+        -800
+      ],
+      "id": "470b56ab-27e8-4404-8c87-a59eb4ead778",
+      "name": "Test Case Loader3",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n      \"textPlain\": \"----Original Message----\\nFrom: Peter Jones <p.jones@innovate.tech>\\nSent: Wednesday, May 22, 2024 9:00 AM\\nTo: Your Name <your-sales-email@example.com>\\nSubject: Partnership opportunity\\n\\nHi, I think there could be a synergy between our companies. Let's talk.\"\n    }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        576,
+        -576
+      ],
+      "id": "68ab62f4-c6a0-4d38-b219-a8d89f3986d9",
+      "name": "Test Case Loader4",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a9987188-1c2d-4729-8a79-8d3227cd0660",
+              "leftValue": "={{ Array.isArray($json) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "348c3c68-c1b0-4a24-984e-e322421d3610",
+              "leftValue": "{{$json.length }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2448,
+        -128
+      ],
+      "id": "7f558fc9-3900-47b7-a336-aa91c3fa6f9c",
+      "name": "Company Data Found By Api?"
+    },
+    {
+      "parameters": {
+        "jsCode": "let output = items[0].json;\n\n// Case: Supabase sometimes wraps in \"data\"\nif (output.data) {\n  output = output.data;\n}\n\n// If output is an array, pick the first row\nlet firstRow = Array.isArray(output) ? output[0] : output;\n\n// Build response\nif (firstRow && firstRow.id) {\n  // Company exists\n  return [\n    {\n      json: {\n        companyExists: true,\n        company: firstRow\n      }\n    }\n  ];\n} else {\n  // Company does not exist\n  return [\n    {\n      json: {\n        companyExists: false,\n        company: null\n      }\n    }\n  ];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2928,
+        -240
+      ],
+      "id": "cdbaf428-66e2-423d-a961-09a38c46b9ec",
+      "name": "Check Company Exists (Code)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7e48e59f-f61a-4304-8d3b-2d2f79e622c4",
+              "leftValue": "={{$json.leadExists}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1456,
+        -16
+      ],
+      "id": "358bb03c-f516-4c81-a7cb-28d713c8e75a",
+      "name": "lead exists?"
+    },
+    {
+      "parameters": {
+        "jsCode": "let leadExists = false;\nlet lead_id = null;\n\n// Get the first item from the Supabase node\nlet output = items[0].json;\n\n// Case 1: Supabase wraps data in \"data\"\nif (output.data && Array.isArray(output.data)) {\n    output = output.data;\n}\n\n// Case 2: output is already an array\nif (!Array.isArray(output)) {\n    output = [output];\n}\n\n// Check if array has at least one lead\nif (output.length > 0 && output[0].id) {\n    leadExists = true;\n    lead_id = output[0].id;\n}\n\nreturn [{\n    json: {\n        leadExists,\n        lead_id\n    }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        0
+      ],
+      "id": "89d45952-d8c6-432a-9024-0990e1218aa5",
+      "name": "Check Lead Exists (Code)"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableId": "leads",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "email",
+              "keyValue": "={{$json.email}}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "c15c38ba-0c18-4e56-9fda-ad1db2223805",
+      "name": "Check If lead in DB ",
+      "alwaysOutputData": true,
+      "notesInFlow": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "bFjWxpu48pRVerv1",
+          "name": "Supabase account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Email Trigger (IMAP)": {
+      "main": [
+        []
+      ]
+    },
+    "Create Lead": {
+      "main": [
+        [
+          {
+            "node": "Fetch Company (Clearbit)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create company": {
+      "main": [
+        [
+          {
+            "node": "Resolve Company ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Email": {
+      "main": [
+        [
+          {
+            "node": "Lead Parsed ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Company (Clearbit)": {
+      "main": [
+        [
+          {
+            "node": "Company Data Found By Api?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Company in DB1": {
+      "main": [
+        [
+          {
+            "node": "Check Company Exists (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company Exists in DB?": {
+      "main": [
+        [
+          {
+            "node": "Resolve Company ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Company ID": {
+      "main": [
+        [
+          {
+            "node": "Link Lead to Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Parsed ?": {
+      "main": [
+        [
+          {
+            "node": "Check If lead in DB ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Case Loader": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Test Case Loader",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Test Case Loader1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Test Case Loader2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Test Case Loader4",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Test Case Loader3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Case Loader4": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Case Loader1": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Case Loader3": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Case Loader2": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Company Data Found By Api?": {
+      "main": [
+        [
+          {
+            "node": "Lookup Company in DB1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Company Exists (Code)": {
+      "main": [
+        [
+          {
+            "node": "Company Exists in DB?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "lead exists?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Create Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Lead Exists (Code)": {
+      "main": [
+        [
+          {
+            "node": "lead exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If lead in DB ": {
+      "main": [
+        [
+          {
+            "node": "Check Lead Exists (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "5f77b646-f7eb-46ed-84c4-4df79f8c0fb8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b91b87cfc7a26381024d02aa45704e77666d4a45ece7f98342e1c92e9f228292"
+  },
+  "id": "PU0ToneFPVKbv9Is",
+  "tags": []
+}
