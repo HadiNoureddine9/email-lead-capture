@@ -12,9 +12,9 @@ An automated, production-ready workflow that processes forwarded emails, extract
 
 - **API choice**: Used Clearbit Autocomplete (free) instead of the API Endpoint: https://company.clearbit.com/v1/domains/find?name=:name, which typically requires an API key; Autocomplete provides domain + logo without credentials.
 - **Planned error handling**:
-  - Idempotent parse: detect if a lead has already been parsed/created for a message and short‑circuit to avoid duplicates.
+  - Idempotent parse: detect if a lead has already been parsed/created for a message and short‑circuit to avoid duplicates.(done)
   - Company not found: explicit error path and flagging (in addition to the current domain‑only fallback) for better observability.
-
+- **Lead de‑duplication (implemented)**: Before inserting a lead, the workflow SELECTs by email, normalizes the response in code, and gates creation with an IF node. Enrichment + company linking only run for newly created leads.
 ---
 
 ## Setup
